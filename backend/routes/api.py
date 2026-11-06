@@ -6,7 +6,7 @@ from backend.utils.limiter import limiter
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from backend.utils.database import query, init_database, load_scored_logs_to_db
+from backend.utils.database import query
 from ml.detector import detector
 
 # Blueprint = a mini Flask app we plug into the main app
@@ -15,7 +15,7 @@ api = Blueprint("api", __name__)
 
 # ─────────────────────────────────────────────────────────────
 # GET /api/logs
-# Returns all log entries with threat scores
+# Returns paginated log entries with threat scores (maximum 500).
 # Optional: ?limit=50&level=HIGH
 # ─────────────────────────────────────────────────────────────
 @api.route("/logs", methods=["GET"])
@@ -23,21 +23,34 @@ def get_logs():
     limit = request.args.get("limit", 100, type=int)
     level = request.args.get("level", None)
 
+    limit = max(1, min(limit, 500))
+
     if level:
         rows = query(
-            "SELECT * FROM logs WHERE threat_level = ? ORDER BY threat_score DESC LIMIT ?",
+            """
+            SELECT *
+            FROM logs
+            WHERE threat_level = ?
+            ORDER BY threat_score DESC
+            LIMIT ?
+            """,
             (level.upper(), limit)
         )
     else:
         rows = query(
-            "SELECT * FROM logs ORDER BY threat_score DESC LIMIT ?",
+            """
+            SELECT *
+            FROM logs
+            ORDER BY threat_score DESC
+            LIMIT ?
+            """,
             (limit,)
         )
 
     return jsonify({
-        "success" : True,
-        "count"   : len(rows),
-        "data"    : rows
+        "success": True,
+        "count": len(rows),
+        "data": rows
     })
 
 
@@ -49,16 +62,23 @@ def get_logs():
 def get_alerts():
     limit = request.args.get("limit", 50, type=int)
 
-    rows = query("""
-        SELECT * FROM alerts
+    limit = max(1, min(limit, 500))
+
+    rows = query(
+        """
+        SELECT *
+        FROM alerts
+        WHERE threat_level IN ('HIGH', 'CRITICAL')
         ORDER BY threat_score DESC, created_at DESC
         LIMIT ?
-    """, (limit,))
+        """,
+        (limit,)
+    )
 
     return jsonify({
-        "success" : True,
-        "count"   : len(rows),
-        "data"    : rows
+        "success": True,
+        "count": len(rows),
+        "data": rows
     })
 
 
@@ -169,11 +189,26 @@ def get_timeline():
 @api.route("/threats/top-ips", methods=["GET"])
 def get_top_ips():
     rows = query("""
-        SELECT ip_address,
-               COUNT(*)            as total_attempts,
-               MAX(threat_score)   as max_score,
-               SUM(is_anomaly)     as anomaly_count,
-               MAX(threat_level)   as highest_level
+        SELECT
+            ip_address,
+            COUNT(*) AS total_attempts,
+            MAX(threat_score) AS max_score,
+            SUM(is_anomaly) AS anomaly_count,
+            CASE MAX(
+                CASE threat_level
+                    WHEN 'CRITICAL' THEN 4
+                    WHEN 'HIGH' THEN 3
+                    WHEN 'MEDIUM' THEN 2
+                    WHEN 'LOW' THEN 1
+                    ELSE 0
+                END
+            )
+                WHEN 4 THEN 'CRITICAL'
+                WHEN 3 THEN 'HIGH'
+                WHEN 2 THEN 'MEDIUM'
+                WHEN 1 THEN 'LOW'
+                ELSE 'UNKNOWN'
+            END AS highest_level
         FROM logs
         GROUP BY ip_address
         ORDER BY max_score DESC, total_attempts DESC
@@ -182,7 +217,7 @@ def get_top_ips():
 
     return jsonify({
         "success": True,
-        "data"   : rows
+        "data": rows
     })
 
 
@@ -193,10 +228,13 @@ def get_top_ips():
 @api.route("/analyse", methods=["POST"])
 @limiter.limit("10 per minute")
 def analyse_log():
-    data = request.get_json()
+    data = request.get_json(silent=True)
 
-    if not data:
-        return jsonify({"success": False, "error": "No data provided"}), 400
+    if not isinstance(data, dict):
+        return jsonify({
+            "success": False,
+            "error": "Request body must be a valid JSON object."
+    }), 400
 
     required = ["ip_address", "username", "status", "hour"]
     missing  = [f for f in required if f not in data]
@@ -228,10 +266,11 @@ def analyse_log():
 # POST /api/reload
 # Reloads data from CSV into database (useful after retraining)
 # ─────────────────────────────────────────────────────────────
+# Retired endpoint: database reload is no longer available through the API.
 @api.route("/reload", methods=["POST"])
 def reload_data():
-    count = load_scored_logs_to_db()
     return jsonify({
-        "success": True,
-        "message": f"Reloaded {count} log entries into database"
-    })
+        "success": False,
+        "error": "Database reload endpoint has been retired.",
+        "message": "Use a controlled administrative import procedure."
+    }), 410

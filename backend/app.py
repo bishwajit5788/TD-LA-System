@@ -56,9 +56,8 @@ if __name__ == "__main__":
     if not os.path.exists("backend/models/isolation_forest.pkl"):
         os.system(f"{sys.executable} ml/train_model.py")
 
-    from backend.utils.database import init_database, load_scored_logs_to_db
+    from backend.utils.database import init_database
     init_database()
-    load_scored_logs_to_db()
 
     from ml.detector import detector
     detector.load_model()
@@ -66,8 +65,8 @@ if __name__ == "__main__":
     app = create_app()
     debug_mode = os.environ.get("FLASK_DEBUG", "false").lower() == "true"
     app.run(
-    host="0.0.0.0",
-    port=5000,
-    debug=debug_mode,
+    host="127.0.0.1",
+    port=5001,
+    debug=False,
     use_reloader=False
     )

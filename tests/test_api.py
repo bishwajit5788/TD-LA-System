@@ -6,21 +6,29 @@ import json
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from backend.app import create_app
-from backend.utils.database import init_database, load_scored_logs_to_db
+from backend.utils import database
 
 
 @pytest.fixture
-def client():
+def client(tmp_path, monkeypatch):
     """
-    Creates a test version of our Flask app.
-    pytest calls this automatically before each test.
+    Creates an isolated Flask test client with a temporary SQLite database.
+    Production database records are never modified by this fixture.
     """
+    test_db = tmp_path / "test_threats.db"
+
+    monkeypatch.setattr(database, "DB_PATH", str(test_db))
+
     app = create_app()
     app.config["TESTING"] = True
-    init_database()
-    load_scored_logs_to_db()
-    with app.test_client() as client:
-        yield client
+
+    database.init_database()
+
+    count = database.load_scored_logs_to_db()
+    assert count > 0, "Test dataset was not loaded."
+
+    with app.test_client() as test_client:
+        yield test_client
 
 
 # ════════════════════════════════════════════════════════════

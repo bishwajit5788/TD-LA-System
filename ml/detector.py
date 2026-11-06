@@ -63,7 +63,21 @@ class ThreatDetector:
         threat_colors  = []
 
         for i, (_, row) in enumerate(X.iterrows()):
-            score = calculate_threat_score(row.to_dict(), anomaly_scores[i])
+            scoring_row = row.to_dict()
+
+            # A manually supplied count is contextual input, not
+            # verified temporal history. Keep it separately named.
+            if "failed_attempts" in df.columns:
+                reported_failures = df.iloc[i]["failed_attempts"]
+                if pd.notna(reported_failures):
+                    scoring_row["reported_failed_attempts"] = (
+                        reported_failures
+                    )
+
+            score = calculate_threat_score(
+                scoring_row,
+                anomaly_scores[i]
+            )
             level = get_threat_level(score)
             color = get_threat_color(level)
             threat_scores.append(score)

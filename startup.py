@@ -28,10 +28,9 @@ else:
 # Setup database
 print("Setting up database...")
 try:
-    from backend.utils.database import init_database, load_scored_logs_to_db
+    from backend.utils.database import init_database
     init_database()
-    count = load_scored_logs_to_db()
-    print(f"Database ready with {count} entries")
+    print("Database initialized without replacing existing records.")
 except Exception as e:
     print(f"Database error: {e}")
     raise

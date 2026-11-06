@@ -28,7 +28,10 @@ def calculate_threat_score(row, anomaly_score):
     bonus = 0
 
     # ── Step 2: Add bonus for brute force ────────────────────
-    failed = row.get("failed_attempts", 0)
+    failed = row.get(
+        "reported_failed_attempts",
+        row.get("failed_attempts_15m", row.get("failed_attempts", 0)),
+    )
     if failed >= 20:
         bonus += 30       # Critical: massive brute force
     elif failed >= 10:
@@ -43,11 +46,11 @@ def calculate_threat_score(row, anomaly_score):
         bonus += 10
 
     # ── Step 4: Add bonus for targeting root/admin ───────────
-    if row.get("is_root_attempt", 0) == 1:
+    if row.get("is_privileged_account", row.get("is_root_attempt", 0)) == 1:
         bonus += 15
 
     # ── Step 5: Add bonus for high IP activity ───────────────
-    ip_count = row.get("ip_attempt_count", 1)
+    ip_count = row.get("ip_events_15m", row.get("ip_attempt_count", 1))
     if ip_count >= 50:
         bonus += 15
     elif ip_count >= 20:
@@ -56,7 +59,7 @@ def calculate_threat_score(row, anomaly_score):
         bonus += 4
 
     # ── Step 6: Add bonus for failed login ───────────────────
-    if row.get("status_numeric", 0) == 1:
+    if row.get("is_failed_event", row.get("status_numeric", 0)) == 1:
         bonus += 5
 
     # ── Step 7: Add bonus for dangerous combo ─────────────────

@@ -1,4 +1,5 @@
 import ipaddress
+from datetime import datetime
 
 
 def validate_analyse_input(data):
@@ -24,7 +25,10 @@ def validate_analyse_input(data):
         errors.append("status must be either 'Failed' or 'Accepted'")
 
     try:
-        hour = int(data.get("hour"))
+        raw_hour = data.get("hour")
+        if isinstance(raw_hour, float):
+            raise ValueError("fractional float not allowed for hour")
+        hour = int(raw_hour)
         if not (0 <= hour <= 23):
             errors.append("hour must be between 0 and 23")
     except (TypeError, ValueError):
@@ -32,7 +36,10 @@ def validate_analyse_input(data):
         hour = None
 
     try:
-        failed_attempts = int(data.get("failed_attempts", 1))
+        raw_failed = data.get("failed_attempts", 1)
+        if isinstance(raw_failed, float):
+            raise ValueError("fractional float not allowed for failed_attempts")
+        failed_attempts = int(raw_failed)
         if failed_attempts < 0:
             errors.append("failed_attempts cannot be negative")
     except (TypeError, ValueError):
@@ -40,18 +47,46 @@ def validate_analyse_input(data):
         failed_attempts = None
 
     try:
-        port = int(data.get("port", 22))
+        raw_port = data.get("port", 22)
+        if isinstance(raw_port, float):
+            raise ValueError("fractional float not allowed for port")
+        port = int(raw_port)
         if not (1 <= port <= 65535):
             errors.append("port must be between 1 and 65535")
     except (TypeError, ValueError):
         errors.append("port must be a whole number between 1 and 65535")
         port = None
 
+    # Guard: if hour is invalid, datetime.replace(hour=None) would raise
+    # TypeError/ValueError before the errors check below — return early.
+    if errors:
+        return None, errors
+
+    raw_timestamp = data.get("timestamp")
+
+    if raw_timestamp is None or (
+        isinstance(raw_timestamp, str) and not raw_timestamp.strip()
+    ):
+        timestamp = datetime.now().replace(
+            hour=hour,
+            minute=0,
+            second=0,
+            microsecond=0
+        ).isoformat(sep=" ")
+    else:
+        try:
+            timestamp = datetime.fromisoformat(
+                str(raw_timestamp).strip()
+            ).isoformat(sep=" ")
+        except ValueError:
+            errors.append("timestamp must be a valid ISO date/time")
+            timestamp = None
+
     if errors:
         return None, errors
 
     cleaned = {
-        "timestamp"      : data.get("timestamp", ""),
+        "timestamp"      : timestamp,
         "ip_address"     : ip_address,
         "username"       : username,
         "status"         : status,

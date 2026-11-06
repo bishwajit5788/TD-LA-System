@@ -1,83 +1,228 @@
+
+from collections import defaultdict, deque
+
 import pandas as pd
-import numpy as np
+
+
+FEATURE_COLUMNS = [
+    "failed_attempts_5m",
+    "failed_attempts_15m",
+    "ip_events_5m",
+    "ip_events_15m",
+    "unique_usernames_15m",
+    "failure_rate_15m",
+    "is_privileged_account",
+    "is_night_hour",
+    "time_since_previous_event",
+    "success_after_failures_15m",
+    "is_failed_event",
+]
+
+PRIVILEGED_USERS = {
+    "root",
+    "admin",
+    "administrator",
+}
+
 
 def engineer_features(df):
     """
-    Convert raw log DataFrame into numerical features
-    that the Isolation Forest model can understand.
+    Generate causal, time-aware authentication features.
 
-    Input  : enriched DataFrame from log_parser.py
-    Output : DataFrame with only numerical feature columns
+    Only events strictly earlier than the current event timestamp
+    contribute to historical features.
+
+    Events sharing the same timestamp are processed together, so
+    they cannot influence one another.
+
+    Ground-truth labels and scenario identifiers are never used.
+    The original row order and index are preserved.
     """
 
-    features = pd.DataFrame()
+    required = {
+        "timestamp",
+        "ip_address",
+        "username",
+        "status",
+    }
 
-    # ── Feature 1: Number of failed attempts ──────────────────
-    # High number = very suspicious (brute force attack)
-    features["failed_attempts"] = df["failed_attempts"].fillna(0)
+    missing = required.difference(df.columns)
 
-    # ── Feature 2: Login hour ─────────────────────────────────
-    # Logins at 2am are more suspicious than logins at 10am
-    features["hour"] = df["hour"].fillna(12)
+    if missing:
+        raise ValueError(
+            f"Missing required columns: {sorted(missing)}"
+        )
 
-    # ── Feature 3: Is it a night hour? ───────────────────────
-    # Binary flag: 1 = midnight to 5am, 0 = normal hours
-    features["is_night_hour"] = df["is_night_hour"].fillna(0)
+    if df.empty:
+        return pd.DataFrame(
+            index=df.index,
+            columns=FEATURE_COLUMNS
+        ).astype(float)
 
-    # ── Feature 4: Is the target a root/admin account? ───────
-    # Attackers almost always target root and admin first
-    features["is_root_attempt"] = df["is_root_attempt"].fillna(0)
+    work = df[
+        ["timestamp", "ip_address", "username", "status"]
+    ].copy()
 
-    # ── Feature 5: How many times has this IP appeared? ──────
-    # An IP that appears 200 times is more suspicious than one
-    # that appears twice
-    features["ip_attempt_count"] = df["ip_attempt_count"].fillna(1)
+    work["_position"] = range(len(work))
 
-    # ── Feature 6: Did this login fail? ──────────────────────
-    # 1 = Failed, 0 = Accepted
-    features["status_numeric"] = df["status_numeric"].fillna(0)
-
-    # ── Feature 7: Port number ────────────────────────────────
-    # Attackers almost always use port 22 (SSH)
-    # Normal users may use various ports
-    features["port"] = df["port"].fillna(22)
-    features["is_ssh_port"] = (features["port"] == 22).astype(int)
-
-    # ── Feature 8: Failed attempt rate per IP ────────────────
-    # failed_attempts divided by total IP appearances
-    # High rate = strong brute force signal
-    features["fail_rate"] = (
-        features["failed_attempts"] /
-        features["ip_attempt_count"].replace(0, 1)
-    ).fillna(0)
-
-    # ── Feature 9: Suspicious combination score ───────────────
-    # If MULTIPLE suspicious things are true at once,
-    # that is much more dangerous than just one
-    features["combo_score"] = (
-        features["is_night_hour"] +
-        features["is_root_attempt"] +
-        features["status_numeric"] +
-        features["is_ssh_port"]
+    work["_timestamp"] = pd.to_datetime(
+        work["timestamp"],
+        errors="coerce"
     )
 
-    print(f"✅ Feature engineering complete — {features.shape[1]} features created")
-    print(f"   Feature columns: {features.columns.tolist()}")
+    if work["_timestamp"].isna().any():
+        raise ValueError(
+            "Invalid or missing timestamps found in input data."
+        )
 
-    return features
+    # Normalize identifiers and authentication status.
+    work["_ip"] = work["ip_address"].fillna("").astype(str).str.strip()
+    work["_username"] = (
+        work["username"].fillna("unknown").astype(str).str.strip().str.lower()
+    )
+    work["_status"] = (
+        work["status"].fillna("").astype(str).str.strip().str.lower()
+    )
+
+    if not work["_status"].isin({"accepted", "failed"}).all():
+        raise ValueError(
+            "Status must contain only Accepted or Failed events."
+        )
+
+    # Missing IPs must not be grouped into one artificial source.
+    work["_ip_key"] = work["_ip"]
+
+    missing_ip = work["_ip_key"] == ""
+
+    work.loc[missing_ip, "_ip_key"] = (
+        "__MISSING_IP_" +
+        work.loc[missing_ip, "_position"].astype(str)
+    )
+
+    # Stable sorting makes processing deterministic.
+    work = work.sort_values(
+        ["_timestamp", "_position"],
+        kind="stable"
+    )
+
+    # Each history item: (timestamp, username, is_failed).
+    histories = defaultdict(deque)
+
+    results = [None] * len(work)
+
+    five_minutes = pd.Timedelta(minutes=5)
+    fifteen_minutes = pd.Timedelta(minutes=15)
+
+    # Process all events sharing a timestamp as a batch.
+    for timestamp, timestamp_group in work.groupby(
+        "_timestamp",
+        sort=True
+    ):
+
+        pending_history = defaultdict(list)
+
+        for _, row in timestamp_group.iterrows():
+
+            ip = row["_ip_key"]
+            username = row["_username"]
+            status = row["_status"]
+
+            history = histories[ip]
+
+            cutoff_15m = timestamp - fifteen_minutes
+            cutoff_5m = timestamp - five_minutes
+
+            # Remove events outside the 15-minute history window.
+            while history and history[0][0] < cutoff_15m:
+                history.popleft()
+
+            previous_15m = list(history)
+
+            previous_5m = [
+                item for item in previous_15m
+                if item[0] >= cutoff_5m
+            ]
+
+            failed_5m = sum(
+                item[2] for item in previous_5m
+            )
+
+            failed_15m = sum(
+                item[2] for item in previous_15m
+            )
+
+            events_5m = len(previous_5m)
+            events_15m = len(previous_15m)
+
+            unique_users = len({
+                item[1] for item in previous_15m
+            })
+
+            failure_rate = (
+                failed_15m / events_15m
+                if events_15m else 0.0
+            )
+
+            previous_event_time = (
+                history[-1][0] if history else None
+            )
+
+            elapsed = (
+                (timestamp - previous_event_time).total_seconds()
+                if previous_event_time is not None
+                else -1.0
+            )
+
+            is_failed = int(status == "failed")
+
+            is_privileged = int(
+                username in PRIVILEGED_USERS
+            )
+
+            is_night = int(
+                timestamp.hour < 5
+            )
+
+            # A successful event following at least five
+            # previous failures from this same IP.
+            success_after_failures = int(
+                status == "accepted" and failed_15m >= 5
+            )
+
+            results[row["_position"]] = {
+                "failed_attempts_5m": failed_5m,
+                "failed_attempts_15m": failed_15m,
+                "ip_events_5m": events_5m,
+                "ip_events_15m": events_15m,
+                "unique_usernames_15m": unique_users,
+                "failure_rate_15m": failure_rate,
+                "is_privileged_account": is_privileged,
+                "is_night_hour": is_night,
+                "time_since_previous_event": elapsed,
+                "success_after_failures_15m": success_after_failures,
+                "is_failed_event": is_failed,
+            }
+
+            pending_history[ip].append(
+                (timestamp, username, is_failed)
+            )
+
+        # Update history only after every event at this timestamp
+        # has been evaluated.
+        for ip, entries in pending_history.items():
+            histories[ip].extend(entries)
+
+    result = pd.DataFrame(
+        results,
+        index=range(len(results)),
+        columns=FEATURE_COLUMNS
+    )
+
+    result.index = df.index
+
+    return result
 
 
 def get_feature_names():
-    """Returns the list of feature column names — used when loading model later."""
-    return [
-        "failed_attempts",
-        "hour",
-        "is_night_hour",
-        "is_root_attempt",
-        "ip_attempt_count",
-        "status_numeric",
-        "port",
-        "is_ssh_port",
-        "fail_rate",
-        "combo_score"
-    ]
+    """Return the exact feature order used by the ML model."""
+    return FEATURE_COLUMNS.copy()

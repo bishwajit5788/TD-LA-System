@@ -1,6 +1,6 @@
 // ── API Base URL ────────────────────────────────────────────
 // Change 5000 to 5001 if you changed the port earlier
-const API = "https://threat-detection-system-g6nm.onrender.com";
+const API = "http://127.0.0.1:5001";
 
 // ── Chart instances (stored so we can destroy and redraw) ───
 let threatLevelChart = null;

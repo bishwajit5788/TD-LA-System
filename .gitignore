@@ -24,3 +24,6 @@ Thumbs.db
 # VS Code settings
 .vscode/
 nsl-kdd-data/
+
+# Local backups
+backups/

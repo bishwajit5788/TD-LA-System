@@ -14,52 +14,118 @@ def get_connection():
 
 def init_database():
     """
-    Create the database tables if they don't exist yet.
-    This is safe to call multiple times — it won't delete existing data.
+    Create database tables and apply safe, idempotent schema migrations.
+
+    Existing log and alert records are preserved.
+    Schema changes are applied transactionally.
     """
     os.makedirs("data", exist_ok=True)
+
     conn = get_connection()
-    cursor = conn.cursor()
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS logs (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            timestamp       TEXT,
-            ip_address      TEXT,
-            username        TEXT,
-            status          TEXT,
-            failed_attempts INTEGER DEFAULT 0,
-            port            INTEGER,
-            hour            INTEGER,
-            threat_score    INTEGER DEFAULT 0,
-            threat_level    TEXT DEFAULT 'LOW',
-            threat_color    TEXT DEFAULT '#22c55e',
-            is_anomaly      INTEGER DEFAULT 0,
-            created_at      TEXT DEFAULT (datetime('now'))
-        )
-    """)
+    detection_columns = {
+        "ml_decision_score": "REAL",
+        "rule_score": "INTEGER",
+        "rule_severity": "TEXT",
+        "rule_matches": "TEXT",
+        "rule_evidence": "TEXT",
+        "is_rule_alert": "INTEGER",
+        "hybrid_score": "REAL",
+        "hybrid_is_alert": "INTEGER",
+        "detection_mode": "TEXT",
+        "model_version": "TEXT",
+        "rule_version": "TEXT",
+    }
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS alerts (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            log_id       INTEGER,
-            timestamp    TEXT,
-            ip_address   TEXT,
-            username     TEXT,
-            threat_score INTEGER,
-            threat_level TEXT,
-            threat_color TEXT,
-            description  TEXT,
-            is_read      INTEGER DEFAULT 0,
-            created_at   TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (log_id) REFERENCES logs(id)
-        )
-    """)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
 
-    conn.commit()
-    conn.close()
-    print("✅ Database initialised successfully")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                ip_address TEXT,
+                username TEXT,
+                status TEXT,
+                failed_attempts INTEGER DEFAULT 0,
+                port INTEGER,
+                hour INTEGER,
+                threat_score INTEGER DEFAULT 0,
+                threat_level TEXT DEFAULT 'LOW',
+                threat_color TEXT DEFAULT '#22c55e',
+                is_anomaly INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
 
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                log_id INTEGER,
+                timestamp TEXT,
+                ip_address TEXT,
+                username TEXT,
+                threat_score INTEGER,
+                threat_level TEXT,
+                threat_color TEXT,
+                description TEXT,
+                is_read INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (log_id) REFERENCES logs(id)
+            )
+        """)
+
+        existing_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(logs)")
+        }
+
+        for column_name, column_type in detection_columns.items():
+            if column_name not in existing_columns:
+                conn.execute(
+                    f"ALTER TABLE logs ADD COLUMN "
+                    f"{column_name} {column_type}"
+                )
+
+        indexes = [
+            """
+            CREATE INDEX IF NOT EXISTS idx_logs_ip_timestamp
+            ON logs(ip_address, timestamp)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_logs_timestamp
+            ON logs(timestamp)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_logs_threat_level_score
+            ON logs(threat_level, threat_score)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_alerts_created_at
+            ON alerts(created_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_alerts_level_created
+            ON alerts(threat_level, created_at)
+            """,
+            """
+            CREATE INDEX IF NOT EXISTS idx_alerts_log_id
+            ON alerts(log_id)
+            """,
+        ]
+
+        for statement in indexes:
+            conn.execute(statement)
+
+        conn.commit()
+        print("Database initialized and schema migration verified.")
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        conn.close()
 
 def load_scored_logs_to_db():
     """
